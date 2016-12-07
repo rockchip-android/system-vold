@@ -32,6 +32,9 @@ common_src_files := \
 	KeyStorage.cpp \
 	ScryptParameters.cpp \
 	secontext.cpp \
+	MiscManager.cpp \
+        Misc.cpp \
+        G3Dev.cpp
 
 common_c_includes := \
 	system/extras/ext4_utils \
@@ -102,6 +105,10 @@ LOCAL_INIT_RC := vold.rc
 LOCAL_C_INCLUDES := $(common_c_includes)
 LOCAL_CFLAGS := $(vold_cflags)
 LOCAL_CONLYFLAGS := $(vold_conlyflags)
+ifeq ($(strip $(BOARD_HAVE_DONGLE)),true)
+LOCAL_CFLAGS := -Werror=format
+LOCAL_CFLAGS += -DUSE_USB_MODE_SWITCH
+endif
 
 ifeq ($(TARGET_HW_DISK_ENCRYPTION),true)
 LOCAL_C_INCLUDES += $(TARGET_CRYPTFS_HW_PATH)
