@@ -167,7 +167,7 @@ status_t PublicVolume::doMount() {
 	{
 		LOG(DEBUG) << getId() << "Not support Ntfs in BoardConfig";
 	}
-    } else if (mFsType == "ext4") {
+    } else if (mFsType == "ext4" || mFsType == "ext3") {
         int res = ext4::Check(mDevPath, mRawPath);
         if (res == 0 || res == 1) {
             LOG(DEBUG) << getId() << " passed filesystem check";
