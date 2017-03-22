@@ -646,26 +646,46 @@ static android::status_t getMountPath(uid_t uid, const std::string& name, std::s
 static android::status_t mountInNamespace(uid_t uid, int device_fd, const std::string& path) {
     // Remove existing mount.
     android::vold::ForceUnmount(path);
-
-    const auto opts = android::base::StringPrintf(
+    if(DISABLE_SELINUX)
+    {
+      const auto opts = android::base::StringPrintf(
             "fd=%i,"
             "rootmode=40000,"
             "default_permissions,"
             "allow_other,"
-            "user_id=%d,group_id=%d,"
-            "context=\"u:object_r:app_fuse_file:s0\","
-            "fscontext=u:object_r:app_fusefs:s0",
+            "user_id=%d,group_id=%d,",
             device_fd,
             uid,
             uid);
-
-    const int result = TEMP_FAILURE_RETRY(mount(
-            "/dev/fuse", path.c_str(), "fuse",
-            MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME, opts.c_str()));
-    if (result != 0) {
-        PLOG(ERROR) << "Failed to mount " << path;
-        return -errno;
-    }
+      const int result = TEMP_FAILURE_RETRY(mount(
+             "/dev/fuse", path.c_str(), "fuse",
+             MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME, opts.c_str()));
+      if (result != 0) {
+            PLOG(ERROR) << "Failed to mount " << path;
+            return -errno;
+            }
+     }
+     else
+     {
+        const auto opts = android::base::StringPrintf(
+        "fd=%i,"
+        "rootmode=40000,"
+        "default_permissions,"
+        "allow_other,"
+        "user_id=%d,group_id=%d,"
+        "context=\"u:object_r:app_fuse_file:s0\","
+        "fscontext=u:object_r:app_fusefs:s0",
+        device_fd,
+        uid,
+        uid);
+            const int result = TEMP_FAILURE_RETRY(mount(
+                  "/dev/fuse", path.c_str(), "fuse",
+                  MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME, opts.c_str()));
+            if (result != 0) {
+               PLOG(ERROR) << "Failed to mount " << path;
+                return -errno;
+            }
+          }
 
     return android::OK;
 }
@@ -708,7 +728,6 @@ static android::status_t runCommandInNamespace(const std::string& command,
             return -EPERM;
         }
     }
-
     // Matches so far, but refuse to touch if in root namespace
     {
         char rootName[PATH_MAX];
