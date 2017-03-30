@@ -111,7 +111,7 @@ LOCAL_C_INCLUDES := $(common_c_includes)
 LOCAL_CFLAGS := $(vold_cflags)
 LOCAL_CONLYFLAGS := $(vold_conlyflags)
 ifeq ($(strip $(BOARD_HAVE_DONGLE)),true)
-LOCAL_CFLAGS := -Werror=format
+LOCAL_CFLAGS += -Werror=format
 LOCAL_CFLAGS += -DUSE_USB_MODE_SWITCH
 endif
 
