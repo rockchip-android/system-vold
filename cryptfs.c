@@ -65,6 +65,7 @@
 #include <bootloader_message/bootloader_message.h>
 #include <hardware/keymaster0.h>
 #include <hardware/keymaster1.h>
+#include <hardware/keymaster2.h>
 
 #define UNUSED __attribute__((unused))
 
@@ -146,7 +147,49 @@ err:
     *keymaster1_dev = NULL;
     return rc;
 }
+static int keymaster_init3(keymaster0_device_t **keymaster0_dev,
+                          keymaster1_device_t **keymaster1_dev,
+                          keymaster2_device_t **keymaster2_dev)
+{
+    int rc;
 
+    const hw_module_t* mod;
+    rc = hw_get_module_by_class(KEYSTORE_HARDWARE_MODULE_ID, NULL, &mod);
+    if (rc) {
+        ALOGE("could not find any keystore module");
+        goto err;
+    }
+
+    SLOGI("keymaster module name is %s", mod->name);
+    SLOGI("keymaster version is %d", mod->module_api_version);
+
+    *keymaster0_dev = NULL;
+    *keymaster1_dev = NULL;
+    if (mod->module_api_version == KEYMASTER_MODULE_API_VERSION_1_0) {
+        SLOGI("Found keymaster1 module, using keymaster1 API.");
+        rc = keymaster1_open(mod, keymaster1_dev);
+    } else if(mod->module_api_version ==  KEYMASTER_MODULE_API_VERSION_2_0) {
+        SLOGI("Found keymaster1 module, using keymaster2 API.");
+        rc = keymaster2_open(mod, keymaster2_dev);
+    } else {
+        SLOGI("Found keymaster0 module, using keymaster0 API.");
+        rc = keymaster0_open(mod, keymaster0_dev);
+    }
+
+    if (rc) {
+        ALOGE("could not open keymaster device in %s (%s)",
+              KEYSTORE_HARDWARE_MODULE_ID, strerror(-rc));
+        goto err;
+    }
+
+    return 0;
+
+err:
+    *keymaster0_dev = NULL;
+    *keymaster1_dev = NULL;
+    *keymaster2_dev = NULL;
+    return rc;
+}
 /* Should we use keymaster? */
 static int keymaster_check_compatibility()
 {
@@ -199,20 +242,61 @@ static int keymaster_create_key(struct crypt_mnt_ftr *ftr)
     uint8_t* key = 0;
     keymaster0_device_t *keymaster0_dev = 0;
     keymaster1_device_t *keymaster1_dev = 0;
+    keymaster2_device_t *keymaster2_dev = 0;
 
     if (ftr->keymaster_blob_size) {
         SLOGI("Already have key");
         return 0;
     }
 
-    if (keymaster_init(&keymaster0_dev, &keymaster1_dev)) {
+    if (keymaster_init3(&keymaster0_dev, &keymaster1_dev,&keymaster2_dev)) {
         SLOGE("Failed to init keymaster");
         return -1;
     }
 
     int rc = 0;
     size_t key_size = 0;
-    if (keymaster1_dev) {
+
+    if (keymaster2_dev) {
+        keymaster_key_param_t params[] = {
+            /* Algorithm & size specifications.  Stick with RSA for now.  Switch to AES later. */
+            keymaster_param_enum(KM_TAG_ALGORITHM, KM_ALGORITHM_RSA),
+            keymaster_param_int(KM_TAG_KEY_SIZE, RSA_KEY_SIZE),
+            keymaster_param_long(KM_TAG_RSA_PUBLIC_EXPONENT, RSA_EXPONENT),
+
+	    /* The only allowed purpose for this key is signing. */
+	    keymaster_param_enum(KM_TAG_PURPOSE, KM_PURPOSE_SIGN),
+
+            /* Padding & digest specifications. */
+            keymaster_param_enum(KM_TAG_PADDING, KM_PAD_NONE),
+            keymaster_param_enum(KM_TAG_DIGEST, KM_DIGEST_NONE),
+
+            /* Require that the key be usable in standalone mode.  File system isn't available. */
+            keymaster_param_enum(KM_TAG_BLOB_USAGE_REQUIREMENTS, KM_BLOB_STANDALONE),
+
+            /* No auth requirements, because cryptfs is not yet integrated with gatekeeper. */
+            keymaster_param_bool(KM_TAG_NO_AUTH_REQUIRED),
+
+            /* Rate-limit key usage attempts, to rate-limit brute force */
+            keymaster_param_int(KM_TAG_MIN_SECONDS_BETWEEN_OPS, KEYMASTER_CRYPTFS_RATE_LIMIT),
+        };
+        keymaster_key_param_set_t param_set = { params, sizeof(params)/sizeof(*params) };
+        keymaster_key_blob_t key_blob;
+        keymaster_error_t error = keymaster2_dev->generate_key(keymaster2_dev, &param_set,
+                                                               &key_blob,
+                                                               NULL /* characteristics */);
+        if (error != KM_ERROR_OK) {
+            SLOGE("Failed to generate keymaster1 key, error %d", error);
+            rc = -1;
+            goto out;
+        }
+
+        key = (uint8_t*)key_blob.key_material;
+        key_size = key_blob.key_material_size;
+
+    }
+
+    else   if (keymaster1_dev) {
         keymaster_key_param_t params[] = {
             /* Algorithm & size specifications.  Stick with RSA for now.  Switch to AES later. */
             keymaster_param_enum(KM_TAG_ALGORITHM, KM_ALGORITHM_RSA),
@@ -281,6 +365,8 @@ out:
         keymaster0_close(keymaster0_dev);
     if (keymaster1_dev)
         keymaster1_close(keymaster1_dev);
+    if (keymaster2_dev)
+        keymaster2_close(keymaster2_dev);
     free(key);
     return rc;
 }
@@ -295,7 +381,8 @@ static int keymaster_sign_object(struct crypt_mnt_ftr *ftr,
     int rc = 0;
     keymaster0_device_t *keymaster0_dev = 0;
     keymaster1_device_t *keymaster1_dev = 0;
-    if (keymaster_init(&keymaster0_dev, &keymaster1_dev)) {
+    keymaster2_device_t *keymaster2_dev = 0;
+    if (keymaster_init3(&keymaster0_dev, &keymaster1_dev,&keymaster2_dev)) {
         SLOGE("Failed to init keymaster");
         rc = -1;
         goto out;
@@ -404,7 +491,62 @@ static int keymaster_sign_object(struct crypt_mnt_ftr *ftr,
 
         *signature = (uint8_t*)tmp_sig.data;
         *signature_size = tmp_sig.data_length;
-    } else {
+    } else if (keymaster2_dev) {
+        keymaster_key_blob_t key = { ftr->keymaster_blob, ftr->keymaster_blob_size };
+        keymaster_key_param_t params[] = {
+            keymaster_param_enum(KM_TAG_PADDING, KM_PAD_NONE),
+            keymaster_param_enum(KM_TAG_DIGEST, KM_DIGEST_NONE),
+        };
+        keymaster_key_param_set_t param_set = { params, sizeof(params)/sizeof(*params) };
+        keymaster_operation_handle_t op_handle;
+        keymaster_error_t error = keymaster2_dev->begin(keymaster2_dev, KM_PURPOSE_SIGN, &key,
+                                                        &param_set, NULL /* out_params */,
+                                                        &op_handle);
+        if (error == KM_ERROR_KEY_RATE_LIMIT_EXCEEDED) {
+            // Key usage has been rate-limited.  Wait a bit and try again.
+            sleep(KEYMASTER_CRYPTFS_RATE_LIMIT);
+            error = keymaster2_dev->begin(keymaster2_dev, KM_PURPOSE_SIGN, &key,
+                                          &param_set, NULL /* out_params */,
+                                          &op_handle);
+        }
+        if (error != KM_ERROR_OK) {
+            SLOGE("Error starting keymaster signature transaction: %d", error);
+            rc = -1;
+            goto out;
+        }
+
+        keymaster_blob_t input = { to_sign, to_sign_size };
+        size_t input_consumed;
+        error = keymaster2_dev->update(keymaster2_dev, op_handle, NULL /* in_params */,
+                                       &input, &input_consumed, NULL /* out_params */,
+                                       NULL /* output */);
+        if (error != KM_ERROR_OK) {
+            SLOGE("Error sending data to keymaster signature transaction: %d", error);
+            rc = -1;
+            goto out;
+        }
+        if (input_consumed != to_sign_size) {
+            // This should never happen.  If it does, it's a bug in the keymaster implementation.
+            SLOGE("Keymaster update() did not consume all data.");
+            keymaster2_dev->abort(keymaster2_dev, op_handle);
+            rc = -1;
+            goto out;
+        }
+
+        keymaster_blob_t tmp_sig;
+        keymaster_blob_t input_blob;
+        error = keymaster2_dev->finish(keymaster2_dev, op_handle, NULL /* in_params */, &input_blob /* input */,
+                                       NULL /* verify signature */, NULL /* out_params */,
+                                       &tmp_sig);
+        if (error != KM_ERROR_OK) {
+            SLOGE("Error finishing keymaster signature transaction: %d", error);
+            rc = -1;
+            goto out;
+        }
+
+        *signature = (uint8_t*)tmp_sig.data;
+        *signature_size = tmp_sig.data_length;
+    }else {
         SLOGE("Cryptfs bug: keymaster_init succeded but didn't initialize a device.");
         rc = -1;
         goto out;
@@ -415,6 +557,8 @@ static int keymaster_sign_object(struct crypt_mnt_ftr *ftr,
             keymaster1_close(keymaster1_dev);
         if (keymaster0_dev)
             keymaster0_close(keymaster0_dev);
+        if (keymaster2_dev)
+            keymaster2_close(keymaster2_dev);
 
         return rc;
 }
