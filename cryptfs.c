@@ -1782,6 +1782,8 @@ static int cryptfs_restart_internal(int restart_main)
         return -1;
     }
 
+    property_set("service.bootanim.exit", "0");
+    property_set("ctl.start", "bootanim");
     if (restart_main) {
         /* Here is where we shut down the framework.  The init scripts
          * start all services in one of three classes: core, main or late_start.
