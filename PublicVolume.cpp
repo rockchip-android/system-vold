@@ -200,6 +200,8 @@ status_t PublicVolume::doMount() {
         return -EIO;
     }
 
+    RestoreconRecursive(mRawPath);
+
     if (getMountFlags() & MountFlags::kPrimary) {
         initAsecStage();
     }
