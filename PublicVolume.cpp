@@ -200,7 +200,8 @@ status_t PublicVolume::doMount() {
         return -EIO;
     }
 
-    RestoreconRecursive(mRawPath);
+    //may cause device block for a log while when sdcard/udisk has too many files,but if want sdcard/udisk writable when selinux is enforce,should open this
+    //RestoreconRecursive(mRawPath);
 
     if (getMountFlags() & MountFlags::kPrimary) {
         initAsecStage();
